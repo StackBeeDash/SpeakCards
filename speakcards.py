@@ -87,45 +87,69 @@ def get_audio_duration(audio_path):
     return float(result.stdout.strip())
 
 
+SPEED_ROUNDS = [1.2, 1.0, 0.8, 0.7]
+
+
 def build_video(sentences, output_path, pause_before=1.0, pause_after=1.5):
     """Build the final video from sentences."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         total = len(sentences)
         segments = []
+        seg_idx = 0
 
         for i, sentence in enumerate(sentences):
             print(f"  [{i+1}/{total}] {sentence}")
 
             img_path = tmpdir / f"card_{i:03d}.png"
             audio_path = tmpdir / f"audio_{i:03d}.mp3"
-            segment_path = tmpdir / f"segment_{i:03d}.mp4"
 
-            # Generate card image and TTS audio
+            # Generate card image and TTS audio (once per sentence)
             create_card_image(sentence, i, total, str(img_path))
             create_tts_audio(sentence, str(audio_path))
+            base_dur = get_audio_duration(str(audio_path))
 
-            audio_dur = get_audio_duration(str(audio_path))
-            total_dur = pause_before + audio_dur + pause_after
+            for round_idx, speed in enumerate(SPEED_ROUNDS):
+                segment_path = tmpdir / f"segment_{seg_idx:04d}.mp4"
+                adjusted_audio_path = tmpdir / f"audio_{seg_idx:04d}_speed.mp3"
+                seg_idx += 1
 
-            # Create video segment: image + audio with pauses
-            subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-loop", "1", "-i", str(img_path),
-                    "-i", str(audio_path),
-                    "-filter_complex",
-                    f"[1:a]adelay={int(pause_before * 1000)}|{int(pause_before * 1000)},apad[a]",
-                    "-map", "0:v", "-map", "[a]",
-                    "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-t", str(total_dur),
-                    "-r", "30",
-                    str(segment_path),
-                ],
-                capture_output=True,
-            )
-            segments.append(segment_path)
+                speed_label = f"x{speed}"
+                print(f"    Round {round_idx+1}/{len(SPEED_ROUNDS)} ({speed_label})")
+
+                # First: create speed-adjusted audio file
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", str(audio_path),
+                        "-filter:a", f"atempo={speed}",
+                        str(adjusted_audio_path),
+                    ],
+                    capture_output=True,
+                )
+
+                # Measure actual duration of adjusted audio
+                adjusted_dur = get_audio_duration(str(adjusted_audio_path))
+                total_dur = pause_before + adjusted_dur + pause_after
+
+                # Create video segment with adjusted audio
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-i", str(img_path),
+                        "-i", str(adjusted_audio_path),
+                        "-filter_complex",
+                        f"[1:a]adelay={int(pause_before * 1000)}|{int(pause_before * 1000)},apad[a]",
+                        "-map", "0:v", "-map", "[a]",
+                        "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-t", str(total_dur),
+                        "-r", "30",
+                        str(segment_path),
+                    ],
+                    capture_output=True,
+                )
+                segments.append(segment_path)
 
         # Concatenate all segments
         concat_file = tmpdir / "concat.txt"
